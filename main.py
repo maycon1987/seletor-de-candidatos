@@ -4,10 +4,10 @@ import pandas as pd
 import io
 import os
 import requests
-from datetime import datetime
-from supabase import create_client
+import json
+from openai import OpenAI
 
-app = FastAPI(title="Analisador de Currículos")
+app = FastAPI(title="Seletor de Candidatos com IA")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,24 +17,86 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-ENDERECO_EMPRESA = "Av. Dante Alighieri, 520 - Campinas SP"
+ENDERECO_EMPRESA = "Av. Dante Alighieri, 520 - Jardim do Lago, Campinas - SP"
 
 
 def normalizar(valor):
     if pd.isna(valor):
         return ""
-    return str(valor).lower().strip()
+    return str(valor).strip()
+
+
+def analisar_experiencia_com_ia(nome, cargo, experiencia):
+    if not client:
+        return {
+            "erro": "OPENAI_API_KEY não configurada",
+            "nota_ia": 0
+        }
+
+    prompt = f"""
+Analise o candidato abaixo para uma vaga de Assistente de E-commerce.
+
+Nome: {nome}
+Cargo informado: {cargo}
+Experiência informada:
+{experiencia}
+
+Responda APENAS em JSON válido com este formato:
+{{
+  "resumo_profissional": "",
+  "funcoes_identificadas": [],
+  "areas_experiencia": [],
+  "tempo_experiencia_estimado_meses": 0,
+  "experiencia_relevante_ecommerce": true,
+  "pontos_fortes": [],
+  "alertas": [],
+  "nota_ia": 0,
+  "motivo_nota": ""
+}}
+
+Critérios:
+- nota_ia deve ser de 0 a 40.
+- Dê mais nota para atendimento, vendas, e-commerce, marketplace, cadastro de produtos, expedição, estoque, embalagem e rotina administrativa.
+- Se a experiência for muito vaga, reduza a nota.
+- Se houver estabilidade ou tempo claro em empresas, valorize.
+"""
+
+    try:
+        resposta = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Você é um analista de RH especializado em triagem de currículos para comércio, e-commerce e atendimento."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.2
+        )
+
+        texto = resposta.choices[0].message.content
+        texto = texto.replace("```json", "").replace("```", "").strip()
+
+        return json.loads(texto)
+
+    except Exception as e:
+        return {
+            "erro": str(e),
+            "nota_ia": 0
+        }
 
 
 def calcular_tempo_deslocamento(origem):
     try:
-        if not origem:
+        if not GOOGLE_API_KEY or not origem:
             return None
 
         url = "https://routes.googleapis.com/directions/v2:computeRoutes"
@@ -54,11 +116,12 @@ def calcular_tempo_deslocamento(origem):
         response = requests.post(url, json=data, headers=headers, timeout=10)
 
         if response.status_code != 200:
+            print("ERRO GOOGLE:", response.status_code, response.text)
             return None
 
         result = response.json()
 
-        if "routes" not in result:
+        if "routes" not in result or not result["routes"]:
             return None
 
         duracao = result["routes"][0]["duration"]
@@ -66,76 +129,105 @@ def calcular_tempo_deslocamento(origem):
 
         return minutos
 
-    except:
+    except Exception as e:
+        print("ERRO DISTANCIA:", str(e))
         return None
 
 
-def calcular_score(row, palavras_experiencia):
-    pontos = 0
-    motivos = []
+def pontuar_localizacao(minutos):
+    if minutos is None:
+        return 0, "Localização não calculada"
 
-    localizacao = normalizar(row.get("localização do candidato", "")) + ", SP, Brasil"
-    experiencia = normalizar(row.get("experiência relevante", ""))
-    cargo = normalizar(row.get("cargo", ""))
+    if minutos <= 30:
+        return 30, "Muito perto da loja"
+    elif minutos <= 45:
+        return 20, "Distância boa"
+    elif minutos <= 60:
+        return 10, "Distância aceitável"
+    else:
+        return -20, "Muito longe da loja"
 
-    minutos = calcular_tempo_deslocamento(localizacao)
 
-    if minutos is not None:
-        if minutos <= 30:
-            pontos += 30
-            motivos.append("Perto da loja")
-        elif minutos <= 60:
-            pontos += 10
-            motivos.append("Distância ok")
-        else:
-            pontos -= 20
-            motivos.append("Muito longe")
+@app.get("/")
+def home():
+    return {
+        "status": "online",
+        "app": "Seletor de Candidatos com IA"
+    }
 
-    if any(p in experiencia + " " + cargo for p in palavras_experiencia):
-        pontos += 30
-        motivos.append("Experiência compatível")
 
-    return pontos, motivos, minutos
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "google_maps_configurado": bool(GOOGLE_API_KEY),
+        "openai_configurado": bool(OPENAI_API_KEY)
+    }
 
 
 @app.post("/analisar-curriculos")
 async def analisar_curriculos(
     arquivo: UploadFile = File(...),
-    palavras_experiencia: str = Form("ecommerce, atendimento, vendas"),
-    pontuacao_minima: int = Form(20)
+    pontuacao_minima: int = Form(40),
+    limite_resultados: int = Form(20),
+    usar_ia: bool = Form(True)
 ):
-    try:
-        conteudo = await arquivo.read()
+    conteudo = await arquivo.read()
 
-        if arquivo.filename.endswith(".csv"):
-            df = pd.read_csv(io.BytesIO(conteudo))
-        else:
-            df = pd.read_excel(io.BytesIO(conteudo))
+    if arquivo.filename.lower().endswith(".csv"):
+        df = pd.read_csv(io.BytesIO(conteudo))
+    else:
+        df = pd.read_excel(io.BytesIO(conteudo))
 
-        palavras = [p.strip().lower() for p in palavras_experiencia.split(",")]
+    candidatos = []
 
-        candidatos = []
+    for _, row in df.iterrows():
+        nome = normalizar(row.get("nome", ""))
+        cargo = normalizar(row.get("cargo", ""))
+        localizacao = normalizar(row.get("localização do candidato", ""))
+        experiencia = normalizar(row.get("experiência relevante", ""))
+        escolaridade = normalizar(row.get("escolaridade", ""))
+        telefone = normalizar(row.get("telefone", ""))
+        email = normalizar(row.get("e-mail", ""))
 
-        for _, row in df.iterrows():
-            pontos, motivos, minutos = calcular_score(row, palavras)
+        minutos = calcular_tempo_deslocamento(localizacao)
+        pontos_localizacao, motivo_localizacao = pontuar_localizacao(minutos)
 
-            if pontos >= pontuacao_minima:
-                candidatos.append({
-                    "nome": row.get("nome", ""),
-                    "localizacao": row.get("localização do candidato", ""),
-                    "pontuacao": pontos,
-                    "tempo_min": minutos,
-                    "motivos": motivos
-                })
+        analise_ia = {}
+        nota_ia = 0
 
-        return {
-            "status": "ok",
-            "total_aprovados": len(candidatos),
-            "candidatos": candidatos
-        }
+        if usar_ia:
+            analise_ia = analisar_experiencia_com_ia(nome, cargo, experiencia)
+            nota_ia = int(analise_ia.get("nota_ia", 0))
 
-    except Exception as e:
-        return {
-            "status": "erro",
-            "mensagem": str(e)
-        }
+        pontuacao_total = pontos_localizacao + nota_ia
+
+        if pontuacao_total >= pontuacao_minima:
+            candidatos.append({
+                "nome": nome,
+                "telefone": telefone,
+                "email": email,
+                "cargo": cargo,
+                "localizacao": localizacao,
+                "escolaridade": escolaridade,
+                "experiencia_original": experiencia,
+                "tempo_ate_loja_min": minutos,
+                "pontuacao_localizacao": pontos_localizacao,
+                "motivo_localizacao": motivo_localizacao,
+                "pontuacao_ia": nota_ia,
+                "pontuacao_total": pontuacao_total,
+                "analise_ia": analise_ia
+            })
+
+    candidatos = sorted(
+        candidatos,
+        key=lambda x: x["pontuacao_total"],
+        reverse=True
+    )[:limite_resultados]
+
+    return {
+        "status": "ok",
+        "total_candidatos_planilha": len(df),
+        "total_aprovados": len(candidatos),
+        "candidatos": candidatos
+    }
