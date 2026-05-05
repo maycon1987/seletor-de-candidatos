@@ -52,8 +52,8 @@ def calcular_tempo_deslocamento(origem):
         response = requests.post(url, json=data, headers=headers)
 
         if response.status_code != 200:
-            return None, None
-
+    print("ERRO GOOGLE:", response.text)
+    return None, None
         result = response.json()
 
         rota = result["routes"][0]
