@@ -42,7 +42,6 @@ def calcular_tempo_deslocamento(origem):
             "X-Goog-FieldMask": "routes.duration,routes.distanceMeters"
         }
 
-        data = {
             data = {
     "origin": {"address": origem},
     "destination": {"address": ENDERECO_EMPRESA},
