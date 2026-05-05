@@ -22,7 +22,7 @@ GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
-ENDERECO_EMPRESA = "Av. Dante Alighieri, 520 - Jardim do Lago, Campinas - SP"
+ENDERECO_EMPRESA = "Av. Dante Alighieri, 520 - Jardim do Lago, Campinas - SP, Brasil"
 
 
 def normalizar(valor):
@@ -47,7 +47,24 @@ def limpar_telefone(telefone):
     return "55" + numeros
 
 
-def calcular_tempo_google(origem):
+def endereco_com_campinas(localizacao):
+    local = normalizar(localizacao)
+
+    if not local:
+        return ""
+
+    local_baixo = local.lower()
+
+    if "campinas" in local_baixo:
+        return f"{local}, Brasil"
+
+    if "sp" in local_baixo or "são paulo" in local_baixo:
+        return f"{local}, Campinas, Brasil"
+
+    return f"{local}, Campinas - SP, Brasil"
+
+
+def chamada_google_routes(origem, modo):
     try:
         if not GOOGLE_API_KEY or not origem:
             return None
@@ -57,16 +74,16 @@ def calcular_tempo_google(origem):
         headers = {
             "Content-Type": "application/json",
             "X-Goog-Api-Key": GOOGLE_API_KEY,
-            "X-Goog-FieldMask": "routes.duration"
+            "X-Goog-FieldMask": "routes.duration,routes.distanceMeters,routes.legs.steps.travelMode,routes.legs.steps.transitDetails"
         }
 
         data = {
             "origin": {"address": origem},
             "destination": {"address": ENDERECO_EMPRESA},
-            "travelMode": "DRIVING"
+            "travelMode": modo
         }
 
-        response = requests.post(url, json=data, headers=headers, timeout=8)
+        response = requests.post(url, json=data, headers=headers, timeout=12)
 
         if response.status_code != 200:
             print("ERRO GOOGLE:", response.status_code, response.text)
@@ -77,38 +94,108 @@ def calcular_tempo_google(origem):
         if "routes" not in result or not result["routes"]:
             return None
 
-        duracao = result["routes"][0].get("duration", "")
-        if not duracao:
-            return None
-
-        return int(duracao.replace("s", "")) // 60
+        return result["routes"][0]
 
     except Exception as e:
-        print("ERRO DISTANCIA:", str(e))
+        print("ERRO GOOGLE ROUTES:", str(e))
         return None
 
 
-def pontuar_localizacao(localizacao, calcular_distancia):
-    localizacao_txt = texto_baixo(localizacao)
+def analisar_localizacao(localizacao):
+    origem = endereco_com_campinas(localizacao)
 
-    if calcular_distancia:
-        minutos = calcular_tempo_google(localizacao)
+    resultado = {
+        "endereco_consultado": origem,
+        "tempo_carro_min": None,
+        "distancia_metros": None,
+        "tempo_transporte_publico_min": None,
+        "qtd_onibus": None,
+        "qtd_conducoes": None,
+        "pontuacao_localizacao": 0,
+        "motivo_localizacao": "Localização não calculada",
+        "badge_localizacao": "Localização não calculada"
+    }
 
-        if minutos is not None:
-            if minutos <= 30:
-                return 30, minutos, "Perto da empresa"
-            elif minutos <= 60:
-                return 15, minutos, "Distância aceitável"
-            else:
-                return -10, minutos, "Distante da empresa"
+    if not origem:
+        return resultado
 
-    if "campinas" in localizacao_txt:
-        return 20, None, "Mora em Campinas"
+    rota_carro = chamada_google_routes(origem, "DRIVING")
 
-    if "hortolândia" in localizacao_txt or "sumaré" in localizacao_txt or "valinhos" in localizacao_txt:
-        return 10, None, "Cidade próxima"
+    if rota_carro:
+        duracao = rota_carro.get("duration", "")
+        distancia = rota_carro.get("distanceMeters")
 
-    return 0, None, "Localização não calculada"
+        if duracao:
+            resultado["tempo_carro_min"] = int(duracao.replace("s", "")) // 60
+
+        resultado["distancia_metros"] = distancia
+
+    rota_transit = chamada_google_routes(origem, "TRANSIT")
+
+    if rota_transit:
+        duracao = rota_transit.get("duration", "")
+
+        if duracao:
+            resultado["tempo_transporte_publico_min"] = int(duracao.replace("s", "")) // 60
+
+        qtd_onibus = 0
+        qtd_conducoes = 0
+
+        legs = rota_transit.get("legs", [])
+
+        for leg in legs:
+            steps = leg.get("steps", [])
+
+            for step in steps:
+                travel_mode = step.get("travelMode", "")
+
+                if travel_mode == "TRANSIT":
+                    qtd_conducoes += 1
+
+                    transit_details = step.get("transitDetails", {})
+                    transit_line = transit_details.get("transitLine", {})
+                    vehicle = transit_line.get("vehicle", {})
+                    vehicle_type = str(vehicle.get("type", "")).upper()
+
+                    if "BUS" in vehicle_type or vehicle_type == "":
+                        qtd_onibus += 1
+
+        resultado["qtd_onibus"] = qtd_onibus
+        resultado["qtd_conducoes"] = qtd_conducoes
+
+    tempo_ref = resultado["tempo_transporte_publico_min"] or resultado["tempo_carro_min"]
+
+    if tempo_ref is None:
+        resultado["pontuacao_localizacao"] = 0
+        resultado["motivo_localizacao"] = "Tempo não identificado"
+        resultado["badge_localizacao"] = "Sem tempo"
+    elif tempo_ref <= 30:
+        resultado["pontuacao_localizacao"] = 30
+        resultado["motivo_localizacao"] = "Muito próximo da empresa"
+        resultado["badge_localizacao"] = "Perto"
+    elif tempo_ref <= 60:
+        resultado["pontuacao_localizacao"] = 15
+        resultado["motivo_localizacao"] = "Distância aceitável"
+        resultado["badge_localizacao"] = "Médio"
+    else:
+        resultado["pontuacao_localizacao"] = -10
+        resultado["motivo_localizacao"] = "Distante da empresa"
+        resultado["badge_localizacao"] = "Longe"
+
+    if resultado["qtd_onibus"] is not None:
+        if resultado["qtd_onibus"] <= 1:
+            resultado["pontuacao_localizacao"] += 10
+            resultado["badge_onibus"] = "Até 1 ônibus"
+        elif resultado["qtd_onibus"] == 2:
+            resultado["pontuacao_localizacao"] += 0
+            resultado["badge_onibus"] = "2 ônibus"
+        else:
+            resultado["pontuacao_localizacao"] -= 10
+            resultado["badge_onibus"] = "Mais de 2 ônibus"
+    else:
+        resultado["badge_onibus"] = "Ônibus não calculado"
+
+    return resultado
 
 
 def score_preliminar(row, palavras):
@@ -255,7 +342,7 @@ async def analisar_curriculos(
     limite_resultados: int = Form(20),
     limite_ia: int = Form(10),
     usar_ia: bool = Form(True),
-    calcular_distancia: bool = Form(False)
+    calcular_distancia: bool = Form(True)
 ):
     try:
         conteudo = await arquivo.read()
@@ -278,12 +365,22 @@ async def analisar_curriculos(
             score_base, motivos_base = score_preliminar(row, palavras)
 
             localizacao = normalizar(row.get("localização do candidato", ""))
-            pontos_localizacao, tempo_min, motivo_localizacao = pontuar_localizacao(
-                localizacao,
-                calcular_distancia
-            )
 
-            score_total_inicial = score_base + pontos_localizacao
+            dados_localizacao = {
+                "pontuacao_localizacao": 0,
+                "tempo_carro_min": None,
+                "tempo_transporte_publico_min": None,
+                "qtd_onibus": None,
+                "qtd_conducoes": None,
+                "motivo_localizacao": "Não calculado",
+                "badge_localizacao": "Não calculado",
+                "badge_onibus": "Não calculado"
+            }
+
+            if calcular_distancia:
+                dados_localizacao = analisar_localizacao(localizacao)
+
+            score_total_inicial = score_base + dados_localizacao["pontuacao_localizacao"]
 
             if score_total_inicial < pontuacao_minima:
                 continue
@@ -291,19 +388,25 @@ async def analisar_curriculos(
             telefone = normalizar(row.get("telefone", ""))
             telefone_limpo = limpar_telefone(telefone)
 
-            pre_candidatos.append({
+            candidato = {
                 "nome": normalizar(row.get("nome", "")),
                 "telefone": telefone,
                 "email": normalizar(row.get("e-mail", "")),
                 "cargo": normalizar(row.get("cargo", "")),
                 "localizacao": localizacao,
+                "endereco_consultado": dados_localizacao.get("endereco_consultado"),
                 "escolaridade": normalizar(row.get("escolaridade", "")),
                 "experiencia_original": normalizar(row.get("experiência relevante", "")),
                 "pontuacao_base": score_base,
                 "motivos_base": motivos_base,
-                "pontuacao_localizacao": pontos_localizacao,
-                "tempo_ate_loja_min": tempo_min,
-                "motivo_localizacao": motivo_localizacao,
+                "pontuacao_localizacao": dados_localizacao["pontuacao_localizacao"],
+                "tempo_carro_min": dados_localizacao.get("tempo_carro_min"),
+                "tempo_transporte_publico_min": dados_localizacao.get("tempo_transporte_publico_min"),
+                "qtd_onibus": dados_localizacao.get("qtd_onibus"),
+                "qtd_conducoes": dados_localizacao.get("qtd_conducoes"),
+                "motivo_localizacao": dados_localizacao.get("motivo_localizacao"),
+                "badge_localizacao": dados_localizacao.get("badge_localizacao"),
+                "badge_onibus": dados_localizacao.get("badge_onibus"),
                 "pontuacao_ia": 0,
                 "pontuacao_total": score_total_inicial,
                 "tempo_total_meses": 0,
@@ -313,7 +416,9 @@ async def analisar_curriculos(
                 "pontos_fortes": [],
                 "alertas": [],
                 "whatsapp_link": f"https://wa.me/{telefone_limpo}" if telefone_limpo else None
-            })
+            }
+
+            pre_candidatos.append(candidato)
 
         pre_candidatos = sorted(
             pre_candidatos,
@@ -349,9 +454,14 @@ async def analisar_curriculos(
 
             candidato["badges"] = [
                 {
-                    "label": candidato["motivo_localizacao"],
+                    "label": candidato["badge_localizacao"],
                     "valor": candidato["pontuacao_localizacao"],
                     "tipo": "localizacao"
+                },
+                {
+                    "label": candidato["badge_onibus"],
+                    "valor": candidato["qtd_onibus"],
+                    "tipo": "onibus"
                 },
                 {
                     "label": "Experiência base",
