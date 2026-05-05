@@ -7,7 +7,7 @@ import json
 import requests
 from openai import OpenAI
 
-app = FastAPI(title="Seletor de Candidatos com IA")
+app = FastAPI(title="Seletor Inteligente de Candidatos")
 
 app.add_middleware(
     CORSMiddleware,
@@ -17,117 +17,125 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+GOOGLE_API_KEY = os.getenv("GOOGLE_MAPS_API_KEY")
 
 client = OpenAI(api_key=OPENAI_API_KEY) if OPENAI_API_KEY else None
 
 ENDERECO_EMPRESA = "Av. Dante Alighieri, 520 - Campinas SP"
 
 
-def normalizar(valor):
-    if pd.isna(valor):
+# ------------------ FUNÇÕES ------------------
+
+def normalizar(v):
+    if pd.isna(v):
         return ""
-    return str(valor).strip()
+    return str(v).strip()
 
 
-def texto_baixo(valor):
-    return normalizar(valor).lower()
+def texto(v):
+    return normalizar(v).lower()
 
 
-def calcular_score_rapido(row, palavras):
-    pontos = 0
-
-    localizacao = texto_baixo(row.get("localização do candidato", ""))
-    experiencia = texto_baixo(row.get("experiência relevante", ""))
-    cargo = texto_baixo(row.get("cargo", ""))
-    escolaridade = texto_baixo(row.get("escolaridade", ""))
-    interesse = texto_baixo(row.get("nível de interesse", ""))
-    status = texto_baixo(row.get("status", ""))
-
-    texto_total = experiencia + " " + cargo
-
-    if any(p in texto_total for p in palavras):
-        pontos += 30
-
-    if "campinas" in localizacao:
-        pontos += 15
-
-    if "hortolândia" in localizacao or "sumaré" in localizacao or "valinhos" in localizacao:
-        pontos += 8
-
-    if "médio" in escolaridade or "superior" in escolaridade or "técnico" in escolaridade:
-        pontos += 10
-
-    if "alto" in interesse:
-        pontos += 10
-
-    if "ativo" in status:
-        pontos += 5
-
-    return pontos
-
-
-def analisar_experiencia_com_ia(candidato):
+def detectar_genero(nome):
     if not client:
-        return {
-            "nota_ia": 0,
-            "experiencia_relevante_ecommerce": False
+        return "não identificado"
+
+    try:
+        resp = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{
+                "role": "user",
+                "content": f"O nome '{nome}' é masculino ou feminino? Responda apenas: masculino ou feminino"
+            }],
+            temperature=0
+        )
+
+        return resp.choices[0].message.content.lower()
+
+    except:
+        return "não identificado"
+
+
+def calcular_distancia(origem):
+    try:
+        if not GOOGLE_API_KEY or not origem:
+            return None
+
+        url = "https://routes.googleapis.com/directions/v2:computeRoutes"
+
+        headers = {
+            "Content-Type": "application/json",
+            "X-Goog-Api-Key": GOOGLE_API_KEY,
+            "X-Goog-FieldMask": "routes.duration"
         }
 
+        data = {
+            "origin": {"address": origem},
+            "destination": {"address": ENDERECO_EMPRESA},
+            "travelMode": "DRIVING"
+        }
+
+        r = requests.post(url, json=data, headers=headers, timeout=8)
+
+        if r.status_code != 200:
+            return None
+
+        dur = r.json()["routes"][0]["duration"]
+        return int(dur.replace("s", "")) // 60
+
+    except:
+        return None
+
+
+def analisar_ia(candidato):
+    if not client:
+        return {}
+
     prompt = f"""
-Analise este candidato para vaga de Assistente de E-commerce.
+Analise o candidato:
 
-Nome: {candidato.get("nome")}
-Cargo: {candidato.get("cargo")}
+Nome: {candidato["nome"]}
 Experiência:
-{candidato.get("experiencia_original")}
+{candidato["experiencia"]}
 
-Responda SOMENTE em JSON:
+Retorne JSON:
 
 {{
-  "nota_ia": 0,
-  "experiencia_relevante_ecommerce": true,
-  "tempo_experiencia_estimado_meses": 0,
-  "resumo_profissional": ""
+ "nota": 0,
+ "relevante": true,
+ "tempo_total": 0,
+ "resumo": ""
 }}
 
-Regras:
-- nota_ia de 0 a 40
-- estime tempo de experiência em meses
-- considere relevante: ecommerce, vendas, atendimento, marketplace, estoque, expedição
-- se for genérico (limpeza, produção, etc), nota baixa
-- faça um resumo curto e direto
+nota de 0 a 40
+tempo em meses
 """
 
     try:
-        resposta = client.chat.completions.create(
+        r = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": prompt}],
-            temperature=0.2,
-            timeout=15
+            temperature=0.2
         )
 
-        texto = resposta.choices[0].message.content
-        texto = texto.replace("```json", "").replace("```", "").strip()
+        txt = r.choices[0].message.content
+        txt = txt.replace("```json", "").replace("```", "")
 
-        return json.loads(texto)
+        return json.loads(txt)
 
-    except Exception as e:
-        print("ERRO IA:", str(e))
-        return {
-            "nota_ia": 0,
-            "experiencia_relevante_ecommerce": False
-        }
+    except:
+        return {}
 
+
+# ------------------ API ------------------
 
 @app.post("/analisar-curriculos")
-async def analisar_curriculos(
+async def analisar(
     arquivo: UploadFile = File(...),
-    palavras_experiencia: str = Form("ecommerce, atendimento, vendas, marketplace, estoque"),
     pontuacao_minima: int = Form(30),
-    usar_ia: bool = Form(True),
-    limite_ia: int = Form(5)
+    limite: int = Form(10),
+    separar_genero: bool = Form(True)
 ):
     conteudo = await arquivo.read()
 
@@ -136,71 +144,76 @@ async def analisar_curriculos(
     else:
         df = pd.read_excel(io.BytesIO(conteudo))
 
-    palavras = [p.strip().lower() for p in palavras_experiencia.split(",")]
-
     candidatos = []
 
-    # 🔹 PRÉ-FILTRO
     for _, row in df.iterrows():
-        score = calcular_score_rapido(row, palavras)
 
-        if score >= pontuacao_minima:
-            candidatos.append({
-                "nome": normalizar(row.get("nome")),
-                "telefone": normalizar(row.get("telefone")),
-                "email": normalizar(row.get("e-mail")),
-                "cargo": normalizar(row.get("cargo")),
-                "localizacao": normalizar(row.get("localização do candidato")),
-                "experiencia_original": normalizar(row.get("experiência relevante")),
-                "pontuacao_total": score
-            })
+        nome = normalizar(row.get("nome"))
+        experiencia = normalizar(row.get("experiência relevante"))
+        local = normalizar(row.get("localização do candidato"))
+        telefone = normalizar(row.get("telefone"))
 
-    # 🔥 pega top para IA
-    candidatos = sorted(candidatos, key=lambda x: x["pontuacao_total"], reverse=True)
-    candidatos = candidatos[:limite_ia]
+        base = 0
 
-    candidatos_filtrados = []
+        if "vendas" in texto(experiencia):
+            base += 20
 
-    # 🔹 IA
-    if usar_ia:
-        for c in candidatos:
-            analise = analisar_experiencia_com_ia(c)
+        if "atendimento" in texto(experiencia):
+            base += 20
 
-            nota_ia = int(analise.get("nota_ia", 0))
-            relevante = analise.get("experiencia_relevante_ecommerce", False)
+        minutos = calcular_distancia(local)
 
-            if nota_ia < 15:
-                continue
+        if minutos:
+            if minutos <= 30:
+                base += 30
+            elif minutos <= 60:
+                base += 10
+            else:
+                base -= 10
 
-            if not relevante:
-                continue
+        if base < pontuacao_minima:
+            continue
 
-            c["pontuacao_ia"] = nota_ia
-            c["pontuacao_total"] += nota_ia * 2
+        analise = analisar_ia({
+            "nome": nome,
+            "experiencia": experiencia
+        })
 
-            c["tempo_experiencia"] = analise.get("tempo_experiencia_estimado_meses")
-            c["resumo"] = analise.get("resumo_profissional")
+        nota = analise.get("nota", 0)
+        relevante = analise.get("relevante", False)
 
-            telefone = "".join(filter(str.isdigit, c.get("telefone", "")))
+        if nota < 15 or not relevante:
+            continue
 
-            c["whatsapp_link"] = f"https://wa.me/55{telefone}" if telefone else None
+        genero = detectar_genero(nome)
 
-            candidatos_filtrados.append(c)
+        telefone_limpo = "".join(filter(str.isdigit, telefone))
 
-        candidatos = candidatos_filtrados
+        candidatos.append({
+            "nome": nome,
+            "genero": genero,
+            "pontuacao": base + nota * 2,
+            "tempo_experiencia": analise.get("tempo_total"),
+            "resumo": analise.get("resumo"),
+            "distancia_min": minutos,
+            "tags": [
+                "Perto" if minutos and minutos <= 30 else "Longe",
+                "Boa experiência" if nota > 25 else "Experiência média"
+            ],
+            "whatsapp": f"https://wa.me/55{telefone_limpo}" if telefone_limpo else None
+        })
 
-    candidatos = sorted(candidatos, key=lambda x: x["pontuacao_total"], reverse=True)
+    # 🔥 ORDENAÇÃO
+    candidatos = sorted(candidatos, key=lambda x: x["pontuacao"], reverse=True)
+
+    # 🔥 SEPARAR POR GENERO
+    if separar_genero:
+        homens = [c for c in candidatos if "masculino" in c["genero"]]
+        mulheres = [c for c in candidatos if "feminino" in c["genero"]]
+
+        candidatos = homens + mulheres
 
     return {
-        "status": "ok",
-        "total_final": len(candidatos),
-        "candidatos": candidatos
-    }
-
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "openai_configurado": bool(OPENAI_API_KEY)
+        "total": len(candidatos),
+        "candidatos": candidatos[:limite]
     }
