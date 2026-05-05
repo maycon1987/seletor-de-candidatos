@@ -35,60 +35,6 @@ def texto_baixo(valor):
     return normalizar(valor).lower()
 
 
-def calcular_tempo_deslocamento(origem):
-    try:
-        if not GOOGLE_API_KEY or not origem:
-            return None
-
-        url = "https://routes.googleapis.com/directions/v2:computeRoutes"
-
-        headers = {
-            "Content-Type": "application/json",
-            "X-Goog-Api-Key": GOOGLE_API_KEY,
-            "X-Goog-FieldMask": "routes.duration"
-        }
-
-        data = {
-            "origin": {"address": origem},
-            "destination": {"address": ENDERECO_EMPRESA},
-            "travelMode": "DRIVING"
-        }
-
-        response = requests.post(url, json=data, headers=headers, timeout=8)
-
-        if response.status_code != 200:
-            return None
-
-        result = response.json()
-
-        if "routes" not in result or not result["routes"]:
-            return None
-
-        duracao = result["routes"][0].get("duration", "")
-        if not duracao:
-            return None
-
-        minutos = int(duracao.replace("s", "")) // 60
-        return minutos
-
-    except:
-        return None
-
-
-def pontuar_localizacao(minutos):
-    if minutos is None:
-        return 0
-
-    if minutos <= 30:
-        return 30
-    elif minutos <= 45:
-        return 20
-    elif minutos <= 60:
-        return 10
-    else:
-        return -20
-
-
 def calcular_score_rapido(row, palavras):
     pontos = 0
 
@@ -124,7 +70,10 @@ def calcular_score_rapido(row, palavras):
 
 def analisar_experiencia_com_ia(candidato):
     if not client:
-        return {"nota_ia": 0, "experiencia_relevante_ecommerce": False}
+        return {
+            "nota_ia": 0,
+            "experiencia_relevante_ecommerce": False
+        }
 
     prompt = f"""
 Analise este candidato para vaga de Assistente de E-commerce.
@@ -138,13 +87,17 @@ Responda SOMENTE em JSON:
 
 {{
   "nota_ia": 0,
-  "experiencia_relevante_ecommerce": true
+  "experiencia_relevante_ecommerce": true,
+  "tempo_experiencia_estimado_meses": 0,
+  "resumo_profissional": ""
 }}
 
 Regras:
 - nota_ia de 0 a 40
-- considere relevante: ecommerce, vendas, atendimento, marketplace, estoque, separação de pedidos, expedição
-- se for experiência genérica (limpeza, produção, segurança), dar nota baixa
+- estime tempo de experiência em meses
+- considere relevante: ecommerce, vendas, atendimento, marketplace, estoque, expedição
+- se for genérico (limpeza, produção, etc), nota baixa
+- faça um resumo curto e direto
 """
 
     try:
@@ -160,8 +113,12 @@ Regras:
 
         return json.loads(texto)
 
-    except:
-        return {"nota_ia": 0, "experiencia_relevante_ecommerce": False}
+    except Exception as e:
+        print("ERRO IA:", str(e))
+        return {
+            "nota_ia": 0,
+            "experiencia_relevante_ecommerce": False
+        }
 
 
 @app.post("/analisar-curriculos")
@@ -170,8 +127,7 @@ async def analisar_curriculos(
     palavras_experiencia: str = Form("ecommerce, atendimento, vendas, marketplace, estoque"),
     pontuacao_minima: int = Form(30),
     usar_ia: bool = Form(True),
-    limite_ia: int = Form(5),
-    calcular_distancia: bool = Form(False)
+    limite_ia: int = Form(5)
 ):
     conteudo = await arquivo.read()
 
@@ -196,18 +152,17 @@ async def analisar_curriculos(
                 "cargo": normalizar(row.get("cargo")),
                 "localizacao": normalizar(row.get("localização do candidato")),
                 "experiencia_original": normalizar(row.get("experiência relevante")),
-                "pontuacao_total": score,
-                "pontuacao_ia": None
+                "pontuacao_total": score
             })
 
-    # 🔥 ordena e limita para IA
+    # 🔥 pega top para IA
     candidatos = sorted(candidatos, key=lambda x: x["pontuacao_total"], reverse=True)
     candidatos = candidatos[:limite_ia]
 
-    # 🔹 IA obrigatória
-    if usar_ia:
-        candidatos_filtrados = []
+    candidatos_filtrados = []
 
+    # 🔹 IA
+    if usar_ia:
         for c in candidatos:
             analise = analisar_experiencia_com_ia(c)
 
@@ -222,19 +177,17 @@ async def analisar_curriculos(
 
             c["pontuacao_ia"] = nota_ia
             c["pontuacao_total"] += nota_ia * 2
-            c["analise_ia"] = analise
+
+            c["tempo_experiencia"] = analise.get("tempo_experiencia_estimado_meses")
+            c["resumo"] = analise.get("resumo_profissional")
+
+            telefone = "".join(filter(str.isdigit, c.get("telefone", "")))
+
+            c["whatsapp_link"] = f"https://wa.me/55{telefone}" if telefone else None
 
             candidatos_filtrados.append(c)
 
         candidatos = candidatos_filtrados
-
-    # 🔹 distância opcional
-    if calcular_distancia:
-        for c in candidatos:
-            minutos = calcular_tempo_deslocamento(c["localizacao"])
-            pontos = pontuar_localizacao(minutos)
-            c["tempo_ate_loja_min"] = minutos
-            c["pontuacao_total"] += pontos
 
     candidatos = sorted(candidatos, key=lambda x: x["pontuacao_total"], reverse=True)
 
@@ -242,4 +195,12 @@ async def analisar_curriculos(
         "status": "ok",
         "total_final": len(candidatos),
         "candidatos": candidatos
+    }
+
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "openai_configurado": bool(OPENAI_API_KEY)
     }
