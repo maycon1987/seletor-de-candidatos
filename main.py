@@ -74,7 +74,7 @@ def calcular_score(row, palavras_experiencia):
     pontos = 0
     motivos = []
 
-    localizacao = normalizar(row.get("localização do candidato", ""))
+    localizacao = normalizar(row.get("localização do candidato", "")) + ", SP, Brasil"
     experiencia = normalizar(row.get("experiência relevante", ""))
     cargo = normalizar(row.get("cargo", ""))
 
