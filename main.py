@@ -169,7 +169,6 @@ async def analisar_curriculos(
     arquivo: UploadFile = File(...),
     palavras_experiencia: str = Form("ecommerce, atendimento, vendas, marketplace, estoque"),
     pontuacao_minima: int = Form(30),
-    limite_resultados: int = Form(10),
     usar_ia: bool = Form(True),
     limite_ia: int = Form(5),
     calcular_distancia: bool = Form(False)
@@ -197,48 +196,45 @@ async def analisar_curriculos(
                 "cargo": normalizar(row.get("cargo")),
                 "localizacao": normalizar(row.get("localização do candidato")),
                 "experiencia_original": normalizar(row.get("experiência relevante")),
-                "score_rapido": score,
                 "pontuacao_total": score,
-                "pontuacao_ia": 0,
-                "tempo_ate_loja_min": None
+                "pontuacao_ia": None
             })
 
-    candidatos = sorted(candidatos, key=lambda x: x["score_rapido"], reverse=True)
-    candidatos = candidatos[:limite_resultados]
+    # 🔥 ordena e limita para IA
+    candidatos = sorted(candidatos, key=lambda x: x["pontuacao_total"], reverse=True)
+    candidatos = candidatos[:limite_ia]
 
-    # 🔹 DISTÂNCIA
-    if calcular_distancia:
-        for c in candidatos:
-            minutos = calcular_tempo_deslocamento(c["localizacao"])
-            pontos = pontuar_localizacao(minutos)
-
-            c["tempo_ate_loja_min"] = minutos
-            c["pontuacao_total"] += pontos
-
-    # 🔹 IA (SÓ TOP)
+    # 🔹 IA obrigatória
     if usar_ia:
-        for c in candidatos[:limite_ia]:
+        candidatos_filtrados = []
+
+        for c in candidatos:
             analise = analisar_experiencia_com_ia(c)
 
             nota_ia = int(analise.get("nota_ia", 0))
             relevante = analise.get("experiencia_relevante_ecommerce", False)
 
-            # ❌ elimina fraco
             if nota_ia < 15:
-                c["pontuacao_total"] = 0
                 continue
 
-            # ❌ elimina não relevante
             if not relevante:
-                c["pontuacao_total"] = 0
                 continue
 
-            # 🔥 peso dobrado da IA
             c["pontuacao_ia"] = nota_ia
             c["pontuacao_total"] += nota_ia * 2
+            c["analise_ia"] = analise
 
-    # 🔹 remove zerados
-    candidatos = [c for c in candidatos if c["pontuacao_total"] > 0]
+            candidatos_filtrados.append(c)
+
+        candidatos = candidatos_filtrados
+
+    # 🔹 distância opcional
+    if calcular_distancia:
+        for c in candidatos:
+            minutos = calcular_tempo_deslocamento(c["localizacao"])
+            pontos = pontuar_localizacao(minutos)
+            c["tempo_ate_loja_min"] = minutos
+            c["pontuacao_total"] += pontos
 
     candidatos = sorted(candidatos, key=lambda x: x["pontuacao_total"], reverse=True)
 
