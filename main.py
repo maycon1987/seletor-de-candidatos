@@ -42,11 +42,11 @@ def calcular_tempo_deslocamento(origem):
             "X-Goog-FieldMask": "routes.duration,routes.distanceMeters"
         }
 
-            data = {
-    "origin": {"address": origem},
-    "destination": {"address": ENDERECO_EMPRESA},
-    "travelMode": "DRIVING",
-    "routingPreference": "TRAFFIC_AWARE"
+        data = {
+            "origin": {"address": origem},
+            "destination": {"address": ENDERECO_EMPRESA},
+            "travelMode": "DRIVING",
+            "routingPreference": "TRAFFIC_AWARE"
         }
 
         response = requests.post(url, json=data, headers=headers)
@@ -74,13 +74,10 @@ def pontuar_localizacao(minutos):
 
     if minutos <= 30:
         return 30, f"{minutos} min até a loja (ótimo)"
-
     elif minutos <= 45:
         return 20, f"{minutos} min até a loja (bom)"
-
     elif minutos <= 60:
         return 10, f"{minutos} min até a loja (aceitável)"
-
     else:
         return -20, f"{minutos} min até a loja (muito longe)"
 
@@ -101,7 +98,7 @@ def calcular_score(row, palavras_experiencia, escolaridade_minima):
     status = normalizar(row.get("status", ""))
     cargo = normalizar(row.get("cargo", ""))
 
-    # 🔥 NOVO: localização inteligente
+    # localização
     minutos, distancia = calcular_tempo_deslocamento(localizacao)
     pts_loc, motivo_loc = pontuar_localizacao(minutos)
 
