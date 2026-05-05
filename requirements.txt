@@ -4,3 +4,4 @@ pandas
 openpyxl
 python-multipart
 supabase
+openai>=1.0.0
