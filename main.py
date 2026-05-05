@@ -43,9 +43,11 @@ def calcular_tempo_deslocamento(origem):
         }
 
         data = {
-            "origin": {"address": origem},
-            "destination": {"address": ENDERECO_EMPRESA},
-            "travelMode": "DRIVE"
+            data = {
+    "origin": {"address": origem},
+    "destination": {"address": ENDERECO_EMPRESA},
+    "travelMode": "DRIVING",
+    "routingPreference": "TRAFFIC_AWARE"
         }
 
         response = requests.post(url, json=data, headers=headers)
